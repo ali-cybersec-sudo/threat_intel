@@ -1,16 +1,316 @@
-# System settings – fill in with actual API keys, model names, etc.
+# ==============================================================================
+# CTI Multi-Agent System — System-Wide Configuration
+# File: config/settings.yaml
+# Description: All runtime settings, paths, API key placeholders, and
+#              system constants for the CTI platform. No secrets should be
+#              committed to version control — use environment variables or a
+#              secrets manager and reference them here with the ${ENV_VAR} syntax.
+# ==============================================================================
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. LLM SETTINGS
+#    Defines the models and generation parameters for each agent role.
+#    Using separate configs per agent allows fine-tuning behavior:
+#      - Low temperature  → deterministic, factual agents (Guard, Router, Analyst)
+#      - Higher temperature → more fluent prose (Reporter)
+# ──────────────────────────────────────────────────────────────────────────────
+llm_settings:
+
+  # Primary LLM provider and model (used for all main agents by default)
+  primary:
+    provider: openai                    # Options: openai | anthropic | ollama | azure_openai
+    model: gpt-4o                       # Recommended: gpt-4o (best tool-use + JSON reliability)
+    temperature: 0.1                    # Low = more deterministic → reduces hallucination
+    max_tokens: 4096                    # Enough for full CTI reports with tables
+    top_p: 0.9
+    frequency_penalty: 0.0
+    presence_penalty: 0.0
+    request_timeout_seconds: 90        # Abort if LLM takes longer than this
+
+  # Fallback LLM (used if primary fails or quota is exceeded)
+  fallback:
+    provider: anthropic
+    model: claude-sonnet-4-20250514   # Strong reasoning, good for structured JSON output
+    temperature: 0.1
+    max_tokens: 4096
+    request_timeout_seconds: 90
+
+  # Per-agent overrides — these take precedence over primary settings
+  agent_overrides:
+
+    router_agent:
+      temperature: 0.0                  # Must be fully deterministic (JSON routing decision)
+      max_tokens: 150                   # Response is tiny (just a JSON route label)
+
+    input_guard_agent:
+      temperature: 0.0                  # Security decisions must be deterministic
+      max_tokens: 300                   # JSON verdict is small
+
+    output_guard_agent:
+      temperature: 0.0                  # Redaction must be exact and consistent
+      max_tokens: 8192                  # Must return full sanitized report + manifest
+
+    osint_agent:
+      temperature: 0.2                  # Slightly higher to handle varied source formats
+      max_tokens: 3000
+
+    threat_analyst_agent:
+      temperature: 0.1                  # Analytical precision required
+      max_tokens: 3000
+
+    reporter_agent:
+      temperature: 0.3                  # More creative for fluent executive prose
+      max_tokens: 5000
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. API KEYS — PLACEHOLDERS ONLY
+#    ⚠️  NEVER hardcode real keys here. Use environment variables.
+#    In production, load these with: os.environ.get("OPENAI_API_KEY")
+#    or use a secrets manager (AWS Secrets Manager, HashiCorp Vault).
+#    The ${VAR_NAME} syntax is used here as a placeholder convention.
+# ──────────────────────────────────────────────────────────────────────────────
+api_keys:
+  openai:
+    api_key: "${OPENAI_API_KEY}"          # Set in .env file: OPENAI_API_KEY=sk-...
+    organization_id: "${OPENAI_ORG_ID}"  # Optional: for org-level billing
+
+  anthropic:
+    api_key: "${ANTHROPIC_API_KEY}"       # Set in .env: ANTHROPIC_API_KEY=sk-ant-...
+
+  # Web Search Tools (pick one; Tavily preferred for accuracy over DuckDuckGo)
+  tavily:
+    api_key: "${TAVILY_API_KEY}"          # https://tavily.com — best for CTI/security queries
+    search_depth: advanced               # Options: basic | advanced
+    max_results: 10
+
+  serper:                                 # Alternative to Tavily (Google Search API wrapper)
+    api_key: "${SERPER_API_KEY}"          # https://serper.dev
+    country_code: us
+    max_results: 10
+
+  # Threat Intelligence Enrichment APIs (optional but recommended)
+  virustotal:
+    api_key: "${VT_API_KEY}"             # IoC enrichment — hash/IP/domain lookups
+    rate_limit_rpm: 4                    # Free tier: 4 requests/minute
+
+  shodan:
+    api_key: "${SHODAN_API_KEY}"         # Internet-facing asset & IP intelligence
+
+  alienvault_otx:
+    api_key: "${OTX_API_KEY}"            # Open Threat Exchange — free threat feeds
+
+  nvd_nist:
+    api_key: "${NVD_API_KEY}"            # NIST NVD — CVE data (key optional but increases rate limit)
+    base_url: "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. DATABASE & FILE PATHS
+#    All storage locations for vector databases, raw reports, and cache.
+#    Uses relative paths from the project root. Adjust for deployment.
+# ──────────────────────────────────────────────────────────────────────────────
+database_paths:
+
+  # ChromaDB — persistent vector store for long-term memory and RAG
+  chroma:
+    persist_directory: "./data/chroma_db"       # Where ChromaDB stores its files on disk
+    collection_name: "cti_knowledge_base"       # Name of the main collection
+    distance_metric: cosine                     # Options: cosine | l2 | ip (inner product)
+
+  # Raw report storage (PDFs ingested by the RAG engine)
+  raw_reports:
+    directory: "./data/raw_reports"             # Drop CTI PDFs here for ingestion
+    supported_formats:                          # Only these formats will be processed
+      - ".pdf"
+      - ".txt"
+      - ".md"
+      - ".docx"
+    recursive_scan: true                        # Scan subdirectories within raw_reports/
+
+  # Session memory (short-term, in-memory — stored in file for dev, Redis for prod)
+  session_memory:
+    backend: file                               # Options: file | redis | in_memory
+    session_dir: "./data/sessions"              # Used only when backend = file
+    redis_url: "${REDIS_URL}"                   # Used only when backend = redis
+    max_history_turns: 20                       # Max conversation turns kept per session
+
+  # CAG Cache — stores pre-computed answers for repeated queries
+  cag_cache:
+    backend: file                               # Options: file | redis
+    cache_dir: "./data/cache"
+    redis_url: "${REDIS_URL}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. EMBEDDING MODEL
+#    Used to convert text into vectors for semantic search (RAG & memory).
+#    OpenAI embeddings are recommended for accuracy. Use local models for
+#    air-gapped/offline deployments.
+# ──────────────────────────────────────────────────────────────────────────────
+embedding:
+  provider: openai                              # Options: openai | huggingface | ollama
+  model: text-embedding-3-large                 # 3072 dimensions — best accuracy
+  # model: text-embedding-3-small              # 1536 dims — cheaper, slightly less accurate
+  # model: BAAI/bge-m3                         # HuggingFace option: multilingual (Arabic + English)
+  dimensions: 3072
+  batch_size: 100                               # Number of texts to embed per API call
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5. RAG ENGINE SETTINGS
+#    Controls how the Retrieval-Augmented Generation pipeline splits,
+#    indexes, and retrieves documents.
+# ──────────────────────────────────────────────────────────────────────────────
+rag_engine:
+  # Document chunking strategy
+  chunk_size: 800                               # Characters per chunk (800 ≈ ~200 tokens)
+  chunk_overlap: 150                            # Overlap between adjacent chunks (preserves context)
+  chunking_strategy: recursive                  # Options: recursive | sentence | token | semantic
+
+  # Retrieval settings
+  similarity_threshold: 0.72                   # Minimum cosine similarity to include a chunk
+                                                # Range: 0.0–1.0. Lower = more results, less precise.
+                                                # 0.72 is a good balance for technical CTI text.
+  top_k_results: 5                              # Number of top chunks to retrieve per query
+  reranking_enabled: true                       # Re-rank retrieved chunks for better relevance
+  reranker_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Lightweight reranker
+
+  # Metadata filtering — filter retrieved chunks by document metadata
+  metadata_filters_enabled: true
+  filterable_fields:                            # Fields indexed in ChromaDB metadata
+    - source_file
+    - report_date
+    - threat_actor
+    - cve_id
+    - tlp_classification
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 6. CAG (CACHE-AUGMENTED GENERATION) SETTINGS
+# ──────────────────────────────────────────────────────────────────────────────
+cag_cache:
+  enabled: true
+  ttl_seconds: 86400                            # Cache Time-To-Live: 24 hours (86400s)
+                                                # CTI data older than 24h may be stale
+  max_cache_size_mb: 500                        # Max disk/memory for cache storage
+  cache_similarity_threshold: 0.92             # How similar a query must be to a cached query
+                                                # to serve from cache (very high = safer for CTI)
+  cache_key_strategy: semantic_hash            # Options: exact_match | semantic_hash
+  invalidation_strategy: ttl                   # Options: ttl | manual | event_driven
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7. WEB SEARCH SETTINGS
+# ──────────────────────────────────────────────────────────────────────────────
 web_search:
-  provider: duckduckgo  # or tavily, serper, etc.
-  max_results: 5
-rag:
-  provider: chromadb
-  collection_name: cti_reports
-  persist_dir: ./data/chroma_db
-cache:
-  ttl_seconds: 3600
-session:
-  max_turns: 10
-vector_memory:
-  provider: chromadb
-  collection_name: long_term_memory
-  persist_dir: ./data/vector_db
+  primary_provider: tavily                      # Options: tavily | serper | duckduckgo
+  fallback_provider: serper
+  max_results_per_query: 10
+  search_recency_filter: month                  # Options: day | week | month | year | none
+                                                # "month" keeps CTI data fresh but not too narrow
+  include_domains:                              # Prioritize these authoritative CTI sources
+    - nvd.nist.gov
+    - cve.mitre.org
+    - attack.mitre.org
+    - cisa.gov
+    - us-cert.cisa.gov
+    - threatpost.com
+    - bleepingcomputer.com
+    - darkreading.com
+    - unit42.paloaltonetworks.com
+    - securelist.com
+    - mandiant.com
+    - microsoft.com/en-us/security
+  exclude_domains:                              # Exclude low-quality or irrelevant sources
+    - pinterest.com
+    - quora.com
+    - reddit.com                                # Uncomment to exclude (reddit can be useful for CVEs)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8. SYSTEM CONSTANTS
+# ──────────────────────────────────────────────────────────────────────────────
+system:
+  # Language & Localization
+  default_language: english                     # Options: english | arabic | auto
+                                                # "auto" = detect from user input
+  supported_languages:
+    - english
+    - arabic
+  arabic_rtl_ui: true                           # Enable RTL text direction for Arabic in UI
+
+  # Report Settings
+  default_tlp_classification: TLP:AMBER         # Options: TLP:WHITE | TLP:GREEN | TLP:AMBER | TLP:RED
+  report_id_prefix: CTI                         # Report IDs: CTI-YYYYMMDD-NNN
+  report_output_dir: "./data/reports"           # Where final reports are saved
+
+  # Logging & Auditing
+  log_level: INFO                               # Options: DEBUG | INFO | WARNING | ERROR | CRITICAL
+  log_file: "./logs/cti_system.log"
+  log_rotation: daily                           # Options: daily | size | none
+  log_max_size_mb: 100
+  audit_log_enabled: true                       # Log all agent decisions (required for security)
+  audit_log_file: "./logs/audit.log"
+  log_redacted_inputs: true                     # Log BLOCK decisions from Input Guard (no payload)
+
+  # Performance
+  agent_timeout_seconds: 120                    # Max time per agent before timeout error
+  max_concurrent_agents: 3                      # Parallel agent execution limit
+  retry_on_failure: true
+  max_retries: 2
+  retry_delay_seconds: 5
+
+  # Security Constants (for Input/Output Guard Agents)
+  input_guard_enabled: true                     # Toggle Bonus C feature
+  output_guard_enabled: true                    # Toggle Bonus D feature
+  block_scope_violations: true                  # Reject queries outside CTI domain
+  redact_private_ip_ranges:                     # These ranges trigger output redaction
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+
+  # Streamlit UI
+  ui_title: "🛡️ CTI Multi-Agent Intelligence Platform"
+  ui_theme: dark                                # Options: dark | light
+  ui_max_history_display: 50                   # Max conversation turns shown in UI
+  ui_show_agent_trace: true                    # Show which agent handled each step (debug mode)
+  ui_language_toggle: true                     # Show Arabic/English toggle button
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 9. AGENT PIPELINE CONFIGURATION
+#    Defines the execution order and dependencies between agents.
+# ──────────────────────────────────────────────────────────────────────────────
+pipeline:
+  # Guards always run first and last — non-negotiable
+  pre_processing:
+    - input_guard_agent                         # Step 1: Validate input (Bonus C)
+
+  routing:
+    - router_agent                              # Step 2: Decide web_search | rag | database
+
+  # Tool execution based on router decision (only one runs per query)
+  tool_execution:
+    web_search:
+      agent: osint_agent
+      tool: web_search
+    rag:
+      agent: threat_analyst_agent
+      tool: rag_engine
+    database:
+      agent: threat_analyst_agent
+      tool: database_query
+
+  # Analysis always runs after tool execution
+  analysis:
+    - threat_analyst_agent                      # Step 4: MITRE mapping, IoC analysis
+
+  # Reporter compiles the final output
+  reporting:
+    - reporter_agent                            # Step 5: Generate CTI report
+
+  # Output guard always runs last
+  post_processing:
+    - output_guard_agent                        # Step 6: Sanitize output (Bonus D)
