@@ -1,0 +1,12 @@
+# Prompt templates for each agent – keys correspond to agent names
+osint_agent: |
+  You are an OSINT specialist. Given the user query: {query}
+  Search the web for the latest information and summarize findings.
+
+analyst_agent: |
+  You are a cybersecurity analyst. Analyze the following data: {data}
+  Provide insights on threats, IOCs, and MITRE ATT&CK techniques.
+
+reporter_agent: |
+  You are a technical writer. Summarize the analysis: {analysis}
+  into a clear, concise report for the user.

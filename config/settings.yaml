@@ -1,0 +1,16 @@
+# System settings – fill in with actual API keys, model names, etc.
+web_search:
+  provider: duckduckgo  # or tavily, serper, etc.
+  max_results: 5
+rag:
+  provider: chromadb
+  collection_name: cti_reports
+  persist_dir: ./data/chroma_db
+cache:
+  ttl_seconds: 3600
+session:
+  max_turns: 10
+vector_memory:
+  provider: chromadb
+  collection_name: long_term_memory
+  persist_dir: ./data/vector_db
