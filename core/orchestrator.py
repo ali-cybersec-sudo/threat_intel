@@ -16,6 +16,7 @@ import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
+import re
 
 from config.config_loader import ConfigLoader
 from core.router import Router
@@ -23,6 +24,7 @@ from agents.osint_agent import OSINTAgent
 from agents.analyst_agent import AnalystAgent
 from agents.reporter_agent import ReporterAgent
 from memory.session_memory import SessionMemory
+from memory.cti_memory import CTIMemory
 from security.input_guard import InputGuard
 from security.output_guard import OutputGuard
 from core.intent_classifier import IntentClassifier
@@ -56,6 +58,7 @@ class Orchestrator:
         # Session memory (per-session conversation history)
         session_cfg = self.cfg.get("session", {})
         self.session = SessionMemory(session_cfg)
+        self.cti_memory = CTIMemory(self.cfg.get("memory", {}).get("cti_memory", {}))
 
         # Agent registry (lazy - instantiated on first use)
         self._agents: Dict[str, Any] = {}
@@ -63,9 +66,30 @@ class Orchestrator:
         # Execution history for the current session
         self._history: List[Dict[str, Any]] = []
 
+        # Track whether a report exists in session (for context-aware intent)
+        self._last_active_report: Optional[Dict[str, Any]] = None
+
+        # Counter for unmatched intents (visible in session stats)
+        self._unmatched_intent_count: int = 0
+
         self.classifier = IntentClassifier()
 
-        logger.info("Orchestrator initialised.")
+        # Validate LLM connection at startup
+        self._llm_available = False
+        try:
+            from tools.llm_client import LLMClient, LLMConfigurationError
+            client = LLMClient(dict(self.loader.settings))
+            client.validate_connection()
+            self._llm_available = True
+            logger.info("LLM connection validated successfully.")
+        except Exception as exc:
+            logger.warning(
+                "LLM validation failed at startup: %s. "
+                "The system will run with memory-only fallback until an API key is configured.",
+                exc,
+            )
+
+        logger.info("Orchestrator initialised (llm_available=%s).", self._llm_available)
 
     # =====================================================================
     # Agent factory
@@ -119,10 +143,21 @@ class Orchestrator:
         # ── 2. Routing ───────────────────────────────────────────────────
         # Classify intent and short-circuit conversational queries before
         # invoking the Router and agents.
+        memory_response = self._try_memory_followup(clean_query, start_time)
+        if memory_response:
+            memory_response = self.output_guard.sanitise_dict(memory_response)
+            self._record_turn(clean_query, memory_response, round(time.time() - start_time, 2))
+            return memory_response
+
         classification = self.classifier.classify(clean_query)
+        if classification.get("path") == "conversational" and self.classifier.has_cyber_context(clean_query):
+            classification = {"path": "investigation", "intent": "research", "ioc_type": None, "ioc_value": None}
 
         if classification.get("path") == "conversational":
-            return self._handle_conversational(clean_query, classification.get("intent"))
+            response = self._handle_conversational(clean_query, classification.get("intent"))
+            response = self.output_guard.sanitise_dict(response)
+            self._record_turn(clean_query, response, round(time.time() - start_time, 2))
+            return response
 
         # Continue with normal routing for investigation intents
         plan = self.router.route(clean_query)
@@ -181,14 +216,85 @@ class Orchestrator:
 
         # ── 5. Output sanitisation ───────────────────────────────────────
         response = self.output_guard.sanitise_dict(response)
+        self._remember_investigation(response)
 
         # ── 6. Session memory ────────────────────────────────────────────
-        self.session.add(json.dumps({"role": "user", "content": clean_query}))
-        self.session.add(json.dumps({"role": "assistant", "content": response.get("summary", "")}))
-        self._history.append({"query": clean_query, "response": response, "elapsed": elapsed})
+        self._record_turn(clean_query, response, elapsed)
 
         logger.info("Query processed in %.2f s.", elapsed)
         return response
+
+    def _record_turn(self, query: str, response: Dict[str, Any], elapsed: float) -> None:
+        """Persist one user/assistant turn in short-term session history."""
+        assistant_text = response.get("summary") or response.get("answer") or ""
+        self.session.add(json.dumps({"role": "user", "content": query}, ensure_ascii=False))
+        self.session.add(json.dumps({"role": "assistant", "content": assistant_text}, ensure_ascii=False))
+        self._history.append({"query": query, "response": response, "elapsed": elapsed})
+
+    def _try_memory_followup(self, query: str, start_time: float) -> Optional[Dict[str, Any]]:
+        """Answer follow-up questions from persistent CTI memory before routing."""
+        record = self.cti_memory.resolve_followup(query)
+        if not record:
+            if self.cti_memory.is_followup(query):
+                answer = (
+                    "I do not have a previous IOC investigation in memory for that follow-up. "
+                    "Run an investigation first, for example: `search ip 185.164.81.156`."
+                )
+                return {
+                    "status": "success",
+                    "query": query,
+                    "intent": "memory_followup_missing",
+                    "confidence": None,
+                    "summary": answer,
+                    "answer": answer,
+                    "markdown": "",
+                    "report": None,
+                    "severity": "Info",
+                    "indicators": {},
+                    "agents_used": ["memory"],
+                    "agent_results": {},
+                    "memory_used": False,
+                    "elapsed_seconds": round(time.time() - start_time, 2),
+                }
+            return None
+        answer = self.cti_memory.answer_followup(query, record)
+        elapsed = round(time.time() - start_time, 2)
+        return {
+            "status": "success",
+            "query": query,
+            "intent": "memory_followup",
+            "confidence": record.get("confidence"),
+            "summary": answer,
+            "answer": answer,
+            "markdown": "",
+            "report": None,
+            "severity": record.get("severity", "Info"),
+            "indicators": {
+                f"{record.get('indicator_type', 'indicator')}s": [record.get("indicator")]
+            },
+            "agents_used": ["memory"],
+            "agent_results": {},
+            "memory_used": True,
+            "memory_record": {
+                "indicator": record.get("indicator"),
+                "indicator_type": record.get("indicator_type"),
+                "timestamp": record.get("timestamp"),
+            },
+            "elapsed_seconds": elapsed,
+        }
+
+    def _remember_investigation(self, response: Dict[str, Any]) -> None:
+        """Store investigation responses in durable CTI memory."""
+        record = self.cti_memory.store_response(response)
+        if record:
+            response["memory_saved"] = True
+            response["memory_record"] = {
+                "indicator": record.get("indicator"),
+                "indicator_type": record.get("indicator_type"),
+                "timestamp": record.get("timestamp"),
+            }
+            if response.get("markdown") or response.get("report"):
+                self._last_active_report = response
 
     # =====================================================================
     # Payload preparation
@@ -245,19 +351,58 @@ class Orchestrator:
 
     def _handle_conversational(self, query: str, intent: str) -> Dict[str, Any]:
         """Return a lightweight conversational response without running agents."""
+        if self.classifier.has_cyber_context(query):
+            return self.handle_query(query)
+
+        recent = self.session.get_recent(3)
+        recent_text = " ".join(recent).lower() if recent else ""
+        in_security_context = any(k in recent_text for k in ["ip", "hash", "cve", "mitre", "threat", "domain"])
+
         if intent == "greeting":
+            if "cti analysis system" in recent_text or "security analysis assistant" in recent_text:
+                answer = "Still here. Send me an indicator or a research topic and I will investigate it from the available sources."
+            elif in_security_context:
+                answer = "Hi. I am still tracking this security analysis context, so you can continue with the next indicator or report request."
+            else:
+                answer = "Hi. I can help investigate security indicators, research current vulnerabilities, or build a CTI report."
             answer = "Hello! I'm a CTI analysis system—ask me to investigate an IP, domain, hash, CVE, or request research."
-        elif intent == "capabilities":
             answer = (
-                "I can: \n"
-                "- Look up IP addresses, domains and file hashes for indicators of compromise.\n"
-                "- Research CVEs and MITRE techniques.\n"
-                "- Run an OSINT -> Analyst -> Reporter pipeline to produce full CTI reports.\n"
-                "- Provide concise guidance and context for general cybersecurity questions."
+                "Still here. Send me an indicator or a research topic and I will investigate it from the available sources."
+                if "cti analysis system" in recent_text or "security analysis assistant" in recent_text else
+                "Hi. I am still tracking this security analysis context, so you can continue with the next indicator or report request."
+                if in_security_context else
+                "Hi. I can help investigate security indicators, research current vulnerabilities, or build a CTI report."
             )
+        elif intent == "capabilities":
+            if re.search(r"\bwho are you\b", query, re.IGNORECASE):
+                answer = (
+                    "I'm your security analysis assistant. I keep track of this investigation context, "
+                    "run external intelligence checks when needed, and turn findings into evidence-based reports."
+                    if in_security_context else
+                    "I'm an analysis assistant that helps investigate security indicators and produce clear reports."
+                )
+            else:
+                answer = (
+                    "I can: \n"
+                    "- Investigate IPs, domains, hashes, CVEs, and MITRE techniques.\n"
+                    "- Pull external intelligence and separate raw findings from interpretation.\n"
+                    "- Build structured security reports with risk assessment and evidence notes."
+                )
         else:
-            # Generic short answer for questions and other conversational intents
-            answer = "I can help with that — ask me to investigate an indicator or request a threat report."
+            # Unmatched intent — log it so silent misrouting is visible
+            self._unmatched_intent_count += 1
+            logger.warning(
+                "[UNMATCHED INTENT] input='%s' classified_as='%s' "
+                "unmatched_count=%d",
+                query[:120], intent, self._unmatched_intent_count,
+            )
+            answer = (
+                "I didn't understand that command. Try:\n"
+                "- Investigate an IP, domain, hash, CVE, or MITRE technique\n"
+                "- Research a threat topic (e.g., 'research APT29')\n"
+                "- Summarize or export the report\n"
+                "- Ask a security question"
+            )
 
         return {
             "status": "success",
@@ -301,20 +446,31 @@ class Orchestrator:
                 "Here is the summary:",
                 "Here is a sample executive summary:",
                 "Here is a sample report:",
+                "EXECUTIVE SUMMARY:",
+                "Executive Summary",
+                "Summary of Object",
+                "Findings from Analysis",
             ]
             meaningful = [ln for ln in lines if ln not in placeholder_patterns]
             summary = meaningful[0] if meaningful else (lines[0] if lines else "Report generated successfully.")
         else:
             summary = "Analysis completed but no report was generated."
 
+        confidence = analyst_result.get("confidence")
+        if confidence is None:
+            confidence = osint_result.get("confidence", plan.get("confidence", 0.0))
+        if osint_result.get("memory_context_used"):
+            confidence = max(confidence, osint_result.get("confidence", 0.0), 0.86)
+        severity = self._normalise_severity(analyst_result.get("severity", "Info"))
+
         return {
             "status":     "success",
             "query":      query,
             "intent":     plan.get("intent", "unknown"),
-            "confidence": plan.get("confidence", 0.0),
+            "confidence": round(confidence, 2),
             "summary":    summary,
             "markdown":   markdown,
-            "severity":   analyst_result.get("severity", "Info"),
+            "severity":   severity,
             "indicators": plan.get("indicators", {}),
             "agents_used": plan.get("agents", []),
             "agent_results": {
@@ -322,8 +478,31 @@ class Orchestrator:
                 "analyst":  analyst_result,
                 "reporter": reporter_result,
             },
+            "llm_provider_used": (
+                reporter_result.get("llm_provider_used")
+                or analyst_result.get("llm_provider_used")
+                or osint_result.get("llm_provider_used")
+                or self.router.last_llm_meta.get("provider")
+            ),
+            "llm_fallback_triggered": any([
+                bool(osint_result.get("llm_fallback_triggered", False)),
+                bool(analyst_result.get("llm_fallback_triggered", False)),
+                bool(reporter_result.get("llm_fallback_triggered", False)),
+                bool(self.router.last_llm_meta.get("fallback_triggered", False)),
+            ]),
+            "search_provider_used": osint_result.get("search_provider_used"),
+            "search_fallback_triggered": bool(osint_result.get("search_fallback_triggered", False)),
+            "vt_used": bool(analyst_result.get("vt_used", False)),
+            "memory_used": False,
+            "memory_saved": False,
             "elapsed_seconds": elapsed,
         }
+
+    @staticmethod
+    def _normalise_severity(severity: Any) -> str:
+        allowed = {"Info", "Unknown", "Low", "Medium", "High", "Critical"}
+        text = str(severity or "Info").strip().title()
+        return text if text in allowed else "Info"
 
     @staticmethod
     def _error_response(
@@ -360,6 +539,7 @@ class Orchestrator:
         self.session = SessionMemory(self.cfg.get("session", {}))
         self._history.clear()
         self._agents.clear()
+        self._last_active_report = None
         logger.info("Session cleared.")
 
     def __repr__(self) -> str:
@@ -372,9 +552,49 @@ class Orchestrator:
         lightweight handler, and for investigative intents delegates to the
         full ``handle_query`` pipeline to produce real results.
         """
-        classification = self.classifier.classify(query)
+        clean_query = self.input_guard.sanitise(query)
+        memory_response = self._try_memory_followup(clean_query, time.time())
+        if memory_response:
+            memory_response = self.output_guard.sanitise_dict(memory_response)
+            self._record_turn(clean_query, memory_response, memory_response.get("elapsed_seconds", 0.0))
+            return {
+                "status": "success",
+                "path": "memory",
+                "intent": "memory_followup",
+                "answer": memory_response.get("answer"),
+                "report": None,
+                "severity": memory_response.get("severity"),
+                "confidence": memory_response.get("confidence"),
+                "agents_used": ["memory"],
+                "memory_used": bool(memory_response.get("memory_used")),
+                "memory_record": memory_response.get("memory_record"),
+            }
+
+        classification = self.classifier.classify(
+            clean_query, has_active_report=self._last_active_report is not None,
+        )
         path = classification.get("path")
         intent = classification.get("intent")
+        if path == "conversational" and self.classifier.has_cyber_context(query):
+            path = "investigation"
+            intent = "research"
+        # Handle follow-up references using session context; ask for clarification
+        # only if no useful prior investigation context exists.
+        if path == "investigation" and intent == "research":
+            low = query.lower()
+            is_reference = bool(re.search(r"\b(it|that|this|same one|previous)\b", low))
+            if is_reference:
+                history = self.session.get_recent(6)
+                if not any(any(k in h.lower() for k in ["ip", "hash", "domain", "cve", "mitre"]) for h in history):
+                    return {
+                        "path": "conversational",
+                        "intent": "clarification",
+                        "answer": "Please clarify what object you want me to analyze (IP, hash, domain, CVE, or MITRE ID).",
+                        "report": None,
+                        "severity": None,
+                        "confidence": None,
+                        "agents_used": [],
+                    }
         # Base result skeleton
         result: Dict[str, Any] = {
             "path": path,
@@ -388,25 +608,73 @@ class Orchestrator:
 
         if path == "conversational":
             # Use the lightweight conversational handler
-            conv = self._handle_conversational(query, intent)
+            conv = self._handle_conversational(clean_query, intent)
             result["answer"] = conv.get("answer")
             result["report"] = conv.get("report")
             result["severity"] = conv.get("severity")
             result["confidence"] = conv.get("confidence")
             result["agents_used"] = conv.get("agents_used", [])
+            self._record_turn(clean_query, conv, 0.0)
         elif path == "investigation":
             # Run the full pipeline via handle_query to get real agent output
-            full = self.handle_query(query)
+            full = self.handle_query(clean_query)
             # ``handle_query`` returns a dict with keys matching UI expectations
             result["answer"] = full.get("summary") or full.get("answer")
             result["report"] = full.get("markdown")
             result["severity"] = full.get("severity")
             result["confidence"] = full.get("confidence")
             result["agents_used"] = full.get("agents_used", [])
+            result["memory_saved"] = full.get("memory_saved", False)
+            result["memory_used"] = full.get("memory_used", False)
+            result["memory_record"] = full.get("memory_record")
+            # Track last active report for context-aware intent detection
+            if full.get("markdown"):
+                self._last_active_report = full
+        elif path == "report_action":
+            # User wants to act on a report (summarize, export, review, etc.)
+            last_report = self._find_last_report()
+            if last_report:
+                # Re-run the reporter agent with the action request + previous report
+                try:
+                    reporter = self._get_agent("reporter")
+                    payload = {
+                        "action": clean_query,
+                        "previous_report": last_report.get("markdown", ""),
+                        "osint": last_report.get("agent_results", {}).get("osint", {}),
+                        "analyst": last_report.get("agent_results", {}).get("analyst", {}),
+                    }
+                    reporter_result = reporter.execute(payload)
+                    result["answer"] = reporter_result.get("summary", "Report action completed.")
+                    result["report"] = reporter_result.get("markdown", last_report.get("markdown", ""))
+                    result["severity"] = last_report.get("severity")
+                    result["confidence"] = last_report.get("confidence")
+                    result["agents_used"] = ["reporter"]
+                except Exception as exc:
+                    logger.warning("Report action failed, returning last report: %s", exc)
+                    result["answer"] = f"Here is the most recent report. (Could not {clean_query.lower().strip()}: {exc})"
+                    result["report"] = last_report.get("markdown", "")
+                    result["severity"] = last_report.get("severity")
+                    result["confidence"] = last_report.get("confidence")
+                    result["agents_used"] = []
+            else:
+                result["answer"] = (
+                    "No previous report found in this session. "
+                    "Run an investigation first (e.g., analyze an IP, CVE, or domain), "
+                    "then ask me to summarize, export, or review the report."
+                )
+            self._record_turn(clean_query, result, 0.0)
         else:
             result["answer"] = "Unsupported query type."
 
         return result
+
+    def _find_last_report(self) -> Optional[Dict[str, Any]]:
+        """Search session history for the most recent investigation result with a report."""
+        for entry in reversed(self._history):
+            resp = entry.get("response", {})
+            if resp.get("markdown") or resp.get("report"):
+                return resp
+        return None
 
     def _run_pipeline(self, query):
         # Placeholder for the existing osint→analyst→reporter pipeline logic

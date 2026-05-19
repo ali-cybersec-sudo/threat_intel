@@ -37,13 +37,74 @@ class IntentClassifier:
     GREETING_RE = re.compile(r"\b(hi|hello|hey|good\s+morning|good\s+afternoon)\b", re.IGNORECASE)
     CAPABILITIES_RE = re.compile(r"\b(who\s+are\s+you|what\s+can\s+you|help|what\s+do\s+you\s+do)\b", re.IGNORECASE)
 
-    INVESTIGATE_KEYWORDS = re.compile(r"\b(investigate|analyze|analyse|analysis|threat|malicious|scan|lookup|check|research|output|result|show|display|where|what\s+happened)\b", re.IGNORECASE)
+    CYBER_TOPIC_RE = re.compile(
+        r"\b("
+        r"ip|ipv4|ipv6|malicious|malcious|suspicious|attack|attacks|attacked|abuse|"
+        r"vuln|vulns|vulnerability|vulnerabilities|vulnerabilit(?:y|ies)|vulneribilit(?:y|ies)|"
+        r"exploit|exploits|zero[-\s]?day|0day|patch|cve|"
+        r"csrf|xss|sqli|sql\s*injection|injection|rce|lfi|ssrf|idor|mitm|phishing|ransomware|"
+        r"malware|trojan|botnet|apt|threat\s+actor|campaign|ioc|iocs|indicator|indicators|"
+        r"mitre|att&ck|attack\s+tactic|attack\s+technique|initial\s+access|execution|persistence|"
+        r"privilege\s+escalation|defense\s+evasion|credential\s+access|discovery|lateral\s+movement|"
+        r"collection|command\s+and\s+control|exfiltration|impact|process\s+injection|"
+        r"command\s+and\s+scripting\s+interpreter|powershell|web\s+shell|"
+        r"ضار|خطر|مشبوه|خبيث|هاجم|هجم|الاي\s*بي|آي\s*بي|اي\s*بي|مؤشر|اختراق|ثغرة|تهديد"
+        r")\b",
+        re.IGNORECASE,
+    )
+    RESEARCH_VERB_RE = re.compile(
+        r"\b(grab|get|find|show|list|search|latest|new|recent|investigate|analyze|analyse|"
+        r"analysis|scan|lookup|check|research|output|result|display|where|what\s+happened|what\s+is)\b",
+        re.IGNORECASE,
+    )
+    INVESTIGATE_KEYWORDS = re.compile(
+        rf"(?:{CYBER_TOPIC_RE.pattern})|(?:{RESEARCH_VERB_RE.pattern})",
+        re.IGNORECASE,
+    )
+
+    # Report-action verbs: user wants to act on an existing/new report
+    REPORT_ACTION_RE = re.compile(
+        r"\b(summarize|summarise|summary|export|explain|review|generate|regenerate|"
+        r"rewrite|shorten|expand|translate|print|download|email|share|format|finalize|finalise|"
+        r"summriaze|sumarize|sumarise|summrise)\b",
+        re.IGNORECASE,
+    )
+    REPORT_OBJECT_RE = re.compile(
+        r"\b(report|findings|results|analysis|assessment|output|conclusion|recommendations)\b",
+        re.IGNORECASE,
+    )
 
     # Basic malware keywords (small set; can be extended)
     MALWARE_KEYWORDS = {"emotet", "wannacry", "trickbot", "ryuk", "conti", "zeus", "mirai"}
 
-    def classify(self, query: str) -> Dict[str, Optional[str]]:
+    def has_cyber_context(self, query: str) -> bool:
+        """Return True when text contains security research or CTI context."""
+        q = (query or "").strip()
+        if not q:
+            return False
+        return bool(
+            self.CYBER_TOPIC_RE.search(q)
+            or self.IPV4_RE.search(q)
+            or self.MD5_RE.search(q)
+            or self.SHA1_RE.search(q)
+            or self.SHA256_RE.search(q)
+            or self.CVE_RE.search(q)
+            or self.MITRE_RE.search(q)
+            or any(m in q.lower() for m in self.MALWARE_KEYWORDS)
+        )
+
+    def classify(self, query: str, *, has_active_report: bool = False) -> Dict[str, Optional[str]]:
         """Classify the given query.
+
+        Parameters
+        ----------
+        query : str
+            The raw user input.
+        has_active_report : bool
+            When ``True``, report-action verbs alone (without an explicit
+            report noun) are sufficient to classify as ``report_action``.
+            This allows phrases like *"just summarize it"* to work when
+            a report already exists in session context.
 
         Returns a dict with keys: path, intent, ioc_type, ioc_value.
         """
@@ -51,12 +112,14 @@ class IntentClassifier:
         if not q:
             return {"path": "conversational", "intent": "empty", "ioc_type": None, "ioc_value": None}
 
+        has_cyber_context = self.has_cyber_context(q)
+
         # 1. Greetings
-        if self.GREETING_RE.search(q):
+        if self.GREETING_RE.search(q) and not has_cyber_context:
             return {"path": "conversational", "intent": "greeting", "ioc_type": None, "ioc_value": None}
 
         # 2. Capabilities / meta-questions
-        if self.CAPABILITIES_RE.search(q):
+        if self.CAPABILITIES_RE.search(q) and not has_cyber_context:
             return {"path": "conversational", "intent": "capabilities", "ioc_type": None, "ioc_value": None}
 
         # 3. IPv4
@@ -102,9 +165,16 @@ class IntentClassifier:
             return {"path": "investigation", "intent": "domain_lookup", "ioc_type": "domain", "ioc_value": dom}
 
         # 10. Research keywords anywhere -> investigation
-        if self.INVESTIGATE_KEYWORDS.search(q):
+        if has_cyber_context or (self.RESEARCH_VERB_RE.search(q) and self.CYBER_TOPIC_RE.search(q)):
             return {"path": "investigation", "intent": "research", "ioc_type": None, "ioc_value": None}
 
-        # 11. Default to conversational
+        # 11. Report action: "summarize the report", "export findings", etc.
+        #     Also matches verb-only ("just summarize it") when a report is active.
+        has_report_verb = bool(self.REPORT_ACTION_RE.search(q))
+        has_report_noun = bool(self.REPORT_OBJECT_RE.search(q))
+        if has_report_verb and (has_report_noun or has_active_report):
+            return {"path": "report_action", "intent": "report_action", "ioc_type": None, "ioc_value": None}
+
+        # 12. Default to conversational
         # Treat short factual questions as conversational (e.g., "what is SQL injection")
         return {"path": "conversational", "intent": "question", "ioc_type": None, "ioc_value": None}

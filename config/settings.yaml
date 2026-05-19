@@ -4,7 +4,8 @@
 # All secret keys live in .env (never commit them here).
 
 # ── Default LLM provider ────────────────────────────────────────────────
-default_llm: openrouter
+default_llm: groq
+llm_fallback_provider: openrouter
 
 # ── LLM provider configurations ─────────────────────────────────────────
 llm:
@@ -14,6 +15,12 @@ llm:
     temperature: 0.2
     max_tokens: 5000
     timeout: 45
+  groq:
+    model: llama-3.1-8b-instant
+    endpoint: https://api.groq.com/openai/v1/chat/completions
+    temperature: 0.2
+    max_tokens: 4096
+    timeout: 30
 
 # ── Agent configurations ─────────────────────────────────────────────────
 agents:
@@ -29,8 +36,11 @@ agents:
 # ── Tool configurations ─────────────────────────────────────────────────
 tools:
   web_search:
-    provider: duckduckgo
+    provider: tavily
+    fallback_provider: duckduckgo
     max_results: 10
+    provider_timeout_seconds: 15
+    min_results_before_fallback: 1
   rag:
     provider: chromadb
     collection_name: cti_reports
@@ -41,6 +51,8 @@ tools:
     top_k: 5
   cache:
     ttl_seconds: 3600
+    persist_dir: ./data/cache
+    filename: cag_cache.json
   input_guard:
     max_length: 5000
     block_injections: true
@@ -54,9 +66,15 @@ memory:
   session_memory:
     max_turns: 10
   vector_memory:
-    provider: chromadb
+    provider: json_keyword
     collection_name: long_term_memory
     persist_dir: ./data/vector_db
+    filename: memory.json
+    max_records: 1000
+  cti_memory:
+    persist_dir: ./data/memory
+    filename: investigations.jsonl
+    max_records: 500
 
 # ── Session settings ────────────────────────────────────────────────────
 session:

@@ -4,7 +4,6 @@ secrets/
 *.secret
 *.key
 *.env
-*.yaml
 
 # Python files
 *.pyc

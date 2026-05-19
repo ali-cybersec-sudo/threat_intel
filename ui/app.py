@@ -204,12 +204,30 @@ if user_input:
                 agents = result.get("agents_used", [])
                 if agents:
                     st.caption(f"Agents: {' \u2192 '.join(agents)}")
+                if result.get("memory_used"):
+                    memory_record = result.get("memory_record") or {}
+                    st.caption(
+                        "Memory used"
+                        + (f": {memory_record.get('indicator')} ({memory_record.get('timestamp')})" if memory_record else "")
+                    )
+                elif result.get("memory_saved"):
+                    memory_record = result.get("memory_record") or {}
+                    st.caption(
+                        "Saved to CTI memory"
+                        + (f": {memory_record.get('indicator')}" if memory_record else "")
+                    )
 
                 with st.expander("\U0001f4cb Detailed Report", expanded=True):
                     st.markdown(report)
             else:
                 if answer:
                     st.markdown(answer)
+                    if result.get("memory_used"):
+                        memory_record = result.get("memory_record") or {}
+                        st.caption(
+                            "Memory used"
+                            + (f": {memory_record.get('indicator')} ({memory_record.get('timestamp')})" if memory_record else "")
+                        )
                 else:
                     st.info("Analysis complete.")
 

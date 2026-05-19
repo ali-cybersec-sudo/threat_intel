@@ -74,6 +74,13 @@ analyst_agent:
     Context:
     {description}
 
+    When analyzing a CVE:
+    - Use your own knowledge about the CVE if the NVD data is empty or incomplete.
+    - CVE-2024-3400 is a critical OS command injection in Palo Alto PAN-OS GlobalProtect, NOT related to Snowflake or any other vendor.
+    - For CVE-2024-3400, recommend PAN-OS patching to 10.2.9-h1+, 11.0.4-h1+, or 11.1.2-h3+ as applicable.
+    - Always verify the affected product name before writing the summary.
+    - If you are not confident about the CVE details, say so explicitly rather than guessing.
+
     Provide:
     1. Vulnerability summary and affected products.
     2. Exploitability assessment (CVSS score interpretation).
@@ -92,14 +99,31 @@ analyst_agent:
     3. Detection opportunities (data sources, analytics).
     4. Recommended mitigations.
 
+  research_analysis: |
+    Analyse this cyber threat research topic: {topic}
+
+    Provide:
+    1. Likely threat context and affected entities.
+    2. Relevant behaviours or TTPs.
+    3. Defensive monitoring ideas.
+    4. Clear uncertainty notes when live evidence is incomplete.
+
   mitre_mapping: |
     Given the following indicator:
     Type: {indicator}
     Value: {value}
 
     Map this indicator to the most relevant MITRE ATT&CK techniques.
-    Respond ONLY with a JSON object:
-    {{"techniques": ["T1234", "T5678"], "explanation": "brief reason"}}
+
+    MITRE ATT&CK Mapping Rules (MUST follow):
+    1. Only use technique IDs that ACTUALLY EXIST in the official MITRE ATT&CK framework.
+    2. Maximum 5 techniques per response.
+    3. For T1078 (Valid Accounts), only these sub-techniques exist: T1078.001, T1078.002, T1078.003, T1078.004. No others.
+    4. Do NOT invent or hallucinate sub-technique numbers.
+    5. If unsure whether a sub-technique exists, use the parent technique ID instead.
+
+    Return ONLY valid JSON in this exact format, no markdown fences:
+    {{"techniques": [{{"id": "T1071.001", "name": "...", "tactic": "...", "description": "..."}}]}}
 
 # ── Reporter Agent ───────────────────────────────────────────────────────
 reporter_agent:
@@ -125,5 +149,7 @@ reporter_agent:
     Overall severity: {severity}
 
     Provide 5-7 actionable recommendations prioritised by urgency.
+    Use only the indicators and evidence provided. Do not invent hypothetical IOCs,
+    incidents, or breach actions when the evidence is empty.
     Format each recommendation as a single bullet point starting with
     a dash (-).  Be specific and practical.

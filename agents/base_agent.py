@@ -1,8 +1,8 @@
-"""BaseAgent – foundational class for all CTI agents.
+"""BaseAgent - foundational class for all CTI agents.
 
 This class provides:
 * OpenRouter LLM integration (via ConfigLoader)
-* Lazy‑loaded tool helpers (web search, RAG, cache, memory)
+* Lazy-loaded tool helpers (web search, RAG, cache, memory)
 * Prompt construction from ``config/prompts.yaml``
 * Structured logging and error handling
 * Helper methods for memory interaction and input validation
@@ -12,13 +12,11 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
-import requests
-
 from config.config_loader import ConfigLoader
+from tools.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -26,19 +24,20 @@ logger = logging.getLogger(__name__)
 class BaseAgent(ABC):
     """Abstract base class for all agents.
 
-    Sub‑classes must implement :meth:`execute` which receives a user query or
-    structured data and returns a JSON‑serialisable ``dict``.
+    Sub-classes must implement :meth:`execute` which receives a user query or
+    structured data and returns a JSON-serialisable ``dict``.
     """
 
     def __init__(self, name: str, config: Optional[Dict[str, Any]] = None) -> None:
         self.name = name
         self.cfg = config or {}
         self.loader = ConfigLoader.instance()
-        self._api_key = self.loader.get_api_key("openrouter")
-        self._llm_cfg = self.loader.get_llm_config("openrouter")
+        self._llm_client = LLMClient(dict(self.loader.settings))
+        self._last_llm_meta: Dict[str, Any] = {}
+        self._last_memory_context: List[str] = []
 
     # ---------------------------------------------------------------------
-    # LLM integration – OpenRouter
+    # LLM integration
     # ---------------------------------------------------------------------
     def _call_llm(
         self,
@@ -47,7 +46,7 @@ class BaseAgent(ABC):
         max_tokens: int | None = None,
         timeout: int | None = None,
     ) -> str:
-        """Call the OpenRouter LLM and return the generated text.
+        """Call the configured LLM and return the generated text.
 
         Parameters
         ----------
@@ -55,71 +54,71 @@ class BaseAgent(ABC):
             Full prompt sent to the model.
         temperature, max_tokens, timeout: optional overrides; fall back to config.
         """
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+        # Retrieve long-term facts
+        vector_context = self._retrieve_from_memory(prompt, mem_type="vector", top_k=2)
+        # Retrieve recent chat history
+        session_context = self._retrieve_from_memory(prompt, mem_type="session", top_k=6)
 
-        endpoint = self._llm_cfg.get("endpoint")
-        model = self._llm_cfg.get("model")
-        payload = {
-            "model": model,
-            "temperature": temperature if temperature is not None else self._llm_cfg.get("temperature", 0.2),
-            "max_tokens": max_tokens if max_tokens is not None else self._llm_cfg.get("max_tokens", 1024),
-        }
+        memory_context = vector_context + session_context
+        self._last_memory_context = memory_context
 
-        # Detect chat-style endpoints and send messages accordingly
-        if endpoint and "chat" in endpoint.lower():
-            payload["messages"] = [{"role": "user", "content": prompt}]
-        else:
-            payload["prompt"] = prompt
+        if memory_context:
+            memory_block = "\n".join(f"- {item[:500]}" for item in memory_context if str(item).strip())
+            prompt = (
+                "Relevant memory and recent chat context:\n"
+                f"{memory_block}\n\n"
+                "Use this context to remember the conversation and prior facts. Do not invent missing facts.\n\n"
+                f"{prompt}"
+            )
 
         try:
-            response = requests.post(
-                endpoint,
-                headers=headers,
-                json=payload,
-                timeout=timeout or self._llm_cfg.get("timeout", 30),
+            text, meta = self._llm_client.generate(
+                prompt=prompt,
+                provider=None,
+                allow_fallback=True,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
             )
-            # If the provider returns a non-2xx status, include the body in our log/error
-            try:
-                response.raise_for_status()
-            except requests.exceptions.HTTPError as http_err:
-                logger.error(
-                    "LLM HTTP error: status=%s response=%s",
-                    getattr(response, "status_code", None),
-                    (response.text[:2000] if response is not None else "<no response>"),
-                )
-                raise RuntimeError(f"LLM request failed: HTTP {response.status_code} - {response.text}") from http_err
-
-            data = response.json()
-
-            # OpenRouter / Chat APIs usually return a `choices` list. Support both
-            # chat-style ('message' -> 'content') and legacy 'text' fields.
-            if isinstance(data, dict):
-                choices = data.get("choices") or []
-                if choices:
-                    first = choices[0]
-                    if isinstance(first, dict):
-                        # Chat-style response
-                        msg = first.get("message")
-                        if isinstance(msg, dict):
-                            return msg.get("content", "")
-                        # Legacy completion-style
-                        txt = first.get("text")
-                        if txt:
-                            return txt
-                # Fallbacks for other provider shapes
-                out = data.get("output") or data.get("result")
-                if isinstance(out, str):
-                    return out
-                if isinstance(out, list):
-                    return "\n".join([o.get("content", str(o)) if isinstance(o, dict) else str(o) for o in out])
-
-            return json.dumps(data)
+            self._last_llm_meta = dict(meta)
+            return text
         except Exception as exc:
-            logger.exception("OpenRouter LLM call failed")
+            logger.warning("LLM call failed; using fallback where possible: %s", exc)
+            if memory_context:
+                self._last_llm_meta = {
+                    "provider": "memory_fallback",
+                    "fallback_triggered": True,
+                    "error": str(exc),
+                }
+
+                # Format snippets neatly (handling json session objects)
+                formatted_snippets = []
+                for item in memory_context:
+                    if not item: continue
+                    if isinstance(item, str) and item.startswith("{"):
+                        try:
+                            msg = __import__("json").loads(item)
+                            formatted_snippets.append(f"{msg.get('role', 'System').title()}: {msg.get('content', '')[:300]}")
+                        except:
+                            formatted_snippets.append(f"- {item[:300]}")
+                    else:
+                        formatted_snippets.append(f"- {str(item)[:300]}")
+
+                snippets_text = "\n".join(formatted_snippets)
+                return (
+                    "**Memory-enhanced response based on prior chat and CTI context:**\n\n"
+                    f"{snippets_text}\n\n"
+                    "> *Note: Live LLM generation was unavailable (API limit or error), so this answer is grounded in retrieved memory.*"
+                )
             raise RuntimeError(f"LLM request failed: {exc}") from exc
+
+    def get_last_llm_meta(self) -> Dict[str, Any]:
+        """Return metadata for the most recent LLM call."""
+        return dict(self._last_llm_meta)
+
+    def get_last_memory_context(self) -> List[str]:
+        """Return memory snippets injected into the most recent LLM call."""
+        return list(self._last_memory_context)
 
     # ---------------------------------------------------------------------
     # Prompt handling
@@ -144,10 +143,10 @@ class BaseAgent(ABC):
             session_mem = __import__("memory.session_memory", fromlist=["SessionMemory"]).SessionMemory(self.loader.get_memory_config("session_memory"))
             session_mem.add(value)
 
-    def _retrieve_from_memory(self, query: str, mem_type: str = "vector") -> List[str]:
+    def _retrieve_from_memory(self, query: str, mem_type: str = "vector", top_k: int = 5) -> List[str]:
         if mem_type == "vector":
             vector_mem = __import__("memory.vector_memory", fromlist=["VectorMemory"]).VectorMemory(self.loader.get_memory_config("vector_memory"))
-            return vector_mem.search(query)
+            return vector_mem.search(query, top_k=top_k)
         elif mem_type == "session":
             session_mem = __import__("memory.session_memory", fromlist=["SessionMemory"]).SessionMemory(self.loader.get_memory_config("session_memory"))
             return session_mem.get_recent()
@@ -175,6 +174,6 @@ class BaseAgent(ABC):
     def execute(self, payload: Any) -> Dict[str, Any]:
         """Execute the agent's core logic.
 
-        Returns a JSON‑serialisable dictionary that downstream agents can consume.
+        Returns a JSON-serialisable dictionary that downstream agents can consume.
         """
         raise NotImplementedError

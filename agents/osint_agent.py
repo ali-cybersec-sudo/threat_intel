@@ -57,10 +57,13 @@ class OSINTAgent(BaseAgent):
         string suitable for inclusion in a prompt.
         """
         merged: List[str] = []
-        for item in web_results:
-            merged.append(f"{item.get('title', '')}: {item.get('snippet', '')} ({item.get('url', '')})")
-        merged.extend(rag_results)
-        return "\n\n".join(merged)
+        for item in web_results[:5]:
+            title = str(item.get("title", ""))[:180]
+            snippet = str(item.get("snippet", ""))[:700]
+            url = str(item.get("url", ""))[:250]
+            merged.append(f"{title}: {snippet} ({url})")
+        merged.extend(str(result)[:900] for result in rag_results[:3])
+        return "\n\n".join(merged)[:6000]
 
     # ---------------------------------------------------------------------
     def execute(self, query: str) -> Dict[str, Any]:
@@ -84,11 +87,15 @@ class OSINTAgent(BaseAgent):
         cached = self.cache.get(cache_key)
         if cached:
             logger.info("OSINT cache hit for query: %s", query)
-            return json.loads(cached)
+            data = json.loads(cached)
+            data["cache_hit"] = True
+            data["web_search_latency_seconds"] = 0.0
+            return data
 
         web_results: List[Dict[str, str]] = []
         rag_results: List[str] = []
         attempt = 0
+        web_search_start = time.time()
         while attempt <= self.max_retries:
             try:
                 logger.info("Running web search for query: %s (attempt %d)", query, attempt + 1)
@@ -99,6 +106,7 @@ class OSINTAgent(BaseAgent):
                 attempt += 1
                 if attempt > self.max_retries:
                     return self._handle_error(exc, "Web search")
+        web_search_latency = round(time.time() - web_search_start, 3)
 
         try:
             logger.info("Running RAG retrieval for query: %s", query)
@@ -116,15 +124,37 @@ class OSINTAgent(BaseAgent):
         try:
             llm_response = self._call_llm(prompt)
         except Exception as exc:
-            return self._handle_error(exc, "LLM call")
+            logger.warning("OSINT LLM summarization failed; using deterministic source summary: %s", exc)
+            titles = [item.get("title", "") for item in web_results[:5] if item.get("title")]
+            llm_response = (
+                "Live OSINT sources were collected, but LLM summarization was unavailable. "
+                f"Top source titles: {', '.join(titles) if titles else 'none available'}."
+            )
+            self._last_llm_meta = {
+                "provider": "deterministic_fallback",
+                "fallback_triggered": True,
+                "error": str(exc),
+            }
 
         # Simple confidence heuristic: proportion of non‑empty sources.
+        memory_context_used = bool(self.get_last_memory_context())
         confidence = min(1.0, len(web_results) / 5.0)
+        if memory_context_used:
+            confidence = max(confidence, 0.86)
         result = {
             "agent": "osint",
+            "query": query,
             "summary": llm_response.strip(),
             "sources": [item.get("url") for item in web_results if item.get("url")],
             "confidence": round(confidence, 2),
+            "memory_context_used": memory_context_used,
+            "memory_context_count": len(self.get_last_memory_context()),
+            "cache_hit": False,
+            "web_search_latency_seconds": web_search_latency,
+            "search_provider_used": self.web_tool.last_meta.get("search_provider_used"),
+            "search_fallback_triggered": bool(self.web_tool.last_meta.get("search_fallback_triggered", False)),
+            "llm_provider_used": self.get_last_llm_meta().get("provider"),
+            "llm_fallback_triggered": bool(self.get_last_llm_meta().get("fallback_triggered", False)),
         }
 
         # Cache the JSON string for fast future look‑ups.

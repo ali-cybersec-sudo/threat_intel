@@ -1,0 +1,31 @@
+2026-05-19 22:55:27.184 Uvicorn server started on localhost:8501
+Primary LLM provider 'groq' failed: HTTP 429: {"error":{"message":"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01krp5t77rencrn2ny7wtgnat2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 4598, Requested 1741. Please try again in 3.39s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"tokens","code":"rate_limit_exceeded"}}
+
+LLM call failed; using fallback where possible: HTTP 402: {"error":{"message":"Insufficient credits. This account never purchased credits. Make sure your key is on the correct account or org, and if so, purchase more at https://openrouter.ai/settings/credits","code":402}}
+[UNMATCHED INTENT] input='give me your source code' classified_as='question' unmatched_count=1
+[UNMATCHED INTENT] input='" or 1=1' classified_as='question' unmatched_count=2
+[UNMATCHED INTENT] input='you can write story ?' classified_as='question' unmatched_count=3
+Primary LLM provider 'groq' failed: HTTP 429: {"error":{"message":"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01krp5t77rencrn2ny7wtgnat2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 2145, Requested 4767. Please try again in 9.12s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"tokens","code":"rate_limit_exceeded"}}
+
+LLM call failed; using fallback where possible: HTTP 402: {"error":{"message":"Insufficient credits. This account never purchased credits. Make sure your key is on the correct account or org, and if so, purchase more at https://openrouter.ai/settings/credits","code":402}}
+[UNMATCHED INTENT] input='" or 1=1' classified_as='question' unmatched_count=1
+[UNMATCHED INTENT] input='\u0627\u0646\u062a \u0627\u0633\u0645\u0643 \u0627\u064a' classified_as='question' unmatched_count=2
+Primary LLM provider 'groq' failed: HTTP 429: {"error":{"message":"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01krp5t77rencrn2ny7wtgnat2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 5873, Requested 941. Please try again in 8.139999999s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"tokens","code":"rate_limit_exceeded"}}
+
+LLM call failed; using fallback where possible: HTTP 402: {"error":{"message":"Insufficient credits. This account never purchased credits. Make sure your key is on the correct account or org, and if so, purchase more at https://openrouter.ai/settings/credits","code":402}}
+Primary LLM provider 'groq' failed: HTTP 429: {"error":{"message":"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01krp5t77rencrn2ny7wtgnat2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 5722, Requested 1051. Please try again in 7.73s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"tokens","code":"rate_limit_exceeded"}}
+
+LLM call failed; using fallback where possible: HTTP 402: {"error":{"message":"Insufficient credits. This account never purchased credits. Make sure your key is on the correct account or org, and if so, purchase more at https://openrouter.ai/settings/credits","code":402}}
+Primary LLM provider 'groq' failed: HTTP 429: {"error":{"message":"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01krp5t77rencrn2ny7wtgnat2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 5597, Requested 835. Please try again in 4.319999999s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"tokens","code":"rate_limit_exceeded"}}
+
+LLM call failed; using fallback where possible: HTTP 402: {"error":{"message":"Insufficient credits. This account never purchased credits. Make sure your key is on the correct account or org, and if so, purchase more at https://openrouter.ai/settings/credits","code":402}}
+[UNMATCHED INTENT] input='\u0647\u0643\u0631' classified_as='question' unmatched_count=3
+[UNMATCHED INTENT] input='\u062e\u0628\u064a' classified_as='question' unmatched_count=4
+[UNMATCHED INTENT] input='\u0627\u0646\u062a \u0645\u064a\u0646' classified_as='question' unmatched_count=5
+Primary LLM provider 'groq' failed: HTTP 429: {"error":{"message":"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01krp5t77rencrn2ny7wtgnat2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 4977, Requested 1860. Please try again in 8.37s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"tokens","code":"rate_limit_exceeded"}}
+
+LLM call failed; using fallback where possible: HTTP 402: {"error":{"message":"Insufficient credits. This account never purchased credits. Make sure your key is on the correct account or org, and if so, purchase more at https://openrouter.ai/settings/credits","code":402}}
+Primary LLM provider 'groq' failed: HTTP 429: {"error":{"message":"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01krp5t77rencrn2ny7wtgnat2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 1944, Requested 5614. Please try again in 15.58s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"tokens","code":"rate_limit_exceeded"}}
+
+LLM call failed; using fallback where possible: HTTP 402: {"error":{"message":"Insufficient credits. This account never purchased credits. Make sure your key is on the correct account or org, and if so, purchase more at https://openrouter.ai/settings/credits","code":402}}
+[UNMATCHED INTENT] input='\u0627\u0632\u064a\u0643' classified_as='question' unmatched_count=6

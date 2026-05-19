@@ -35,15 +35,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cti_system")
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 
 def run_ui() -> None:
     """Launch the Streamlit UI."""
     import subprocess
     ui_path = str(Path(__file__).resolve().parent / "ui" / "app.py")
+    url = "http://localhost:8501"
+    print(f"\nStarting Streamlit UI. If the browser does not open, visit: {url}\n")
     logger.info("Launching Streamlit UI: %s", ui_path)
     subprocess.run(
         [sys.executable, "-m", "streamlit", "run", ui_path,
-         "--server.headless", "true"],
+         "--server.address", "localhost",
+         "--server.port", "8501",
+         "--server.headless", "false",
+         "--browser.gatherUsageStats", "false"],
         check=True,
     )
 

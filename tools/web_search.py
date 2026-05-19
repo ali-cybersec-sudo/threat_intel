@@ -35,8 +35,15 @@ class WebSearchTool:
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         self.config = config or {}
         self.provider: str = self.config.get("provider", "duckduckgo").lower()
+        self.fallback_provider: str = self.config.get("fallback_provider", "duckduckgo").lower()
         self.max_results: int = int(self.config.get("max_results", 5))
-        logger.info("WebSearchTool initialised (provider=%s, max_results=%d).", self.provider, self.max_results)
+        self.provider_timeout_seconds: int = int(self.config.get("provider_timeout_seconds", 15))
+        self.min_results_before_fallback: int = int(self.config.get("min_results_before_fallback", 1))
+        self.last_meta: Dict[str, Any] = {}
+        logger.info(
+            "WebSearchTool initialised (provider=%s, fallback=%s, max_results=%d).",
+            self.provider, self.fallback_provider, self.max_results
+        )
 
     # =====================================================================
     # Public API
@@ -54,11 +61,28 @@ class WebSearchTool:
             logger.warning("WebSearchTool: empty query.")
             return []
 
-        if self.provider == "tavily":
-            return self._search_tavily(query)
+        provider = self.provider
+        results: List[Dict[str, str]] = []
+        fallback_triggered = False
 
-        # Default to DuckDuckGo
-        return self._search_duckduckgo(query)
+        if provider == "tavily":
+            results = self._search_tavily(query)
+            if len(results) < self.min_results_before_fallback and self.fallback_provider == "duckduckgo":
+                fallback_triggered = True
+                logger.info("Tavily returned %d results; falling back to DuckDuckGo.", len(results))
+                ddg_results = self._search_duckduckgo(query)
+                if ddg_results:
+                    results = ddg_results
+                    provider = "duckduckgo"
+        else:
+            results = self._search_duckduckgo(query)
+
+        self.last_meta = {
+            "search_provider_used": provider,
+            "search_fallback_triggered": fallback_triggered,
+            "search_results_count": len(results),
+        }
+        return results
 
     # =====================================================================
     # DuckDuckGo provider
@@ -113,7 +137,7 @@ class WebSearchTool:
                     "max_results": self.max_results,
                     "include_answer": False,
                 },
-                timeout=15,
+                timeout=self.provider_timeout_seconds,
             )
             resp.raise_for_status()
             data = resp.json()

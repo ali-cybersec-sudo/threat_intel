@@ -17,9 +17,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
-
 from config.config_loader import ConfigLoader
+from tools.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +37,24 @@ _DOMAIN_RE = re.compile(
 )
 _CVE_RE   = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
 _MITRE_RE = re.compile(r"\bT\d{4}(?:\.\d{3})?\b", re.IGNORECASE)
+_CYBER_TOPIC_RE = re.compile(
+    r"\b("
+    r"vuln|vulns|vulnerability|vulnerabilities|vulnerabilit(?:y|ies)|vulneribilit(?:y|ies)|"
+    r"ip|ipv4|ipv6|malicious|malcious|suspicious|attack|attacks|attacked|abuse|"
+    r"exploit|exploits|zero[-\s]?day|0day|patch|cve|csrf|xss|sqli|sql\s*injection|"
+    r"injection|rce|lfi|ssrf|idor|mitm|phishing|ransomware|malware|trojan|botnet|apt|"
+    r"threat\s+actor|campaign|ioc|iocs|indicator|indicators|mitre|att&ck|initial\s+access|"
+    r"execution|persistence|privilege\s+escalation|defense\s+evasion|credential\s+access|"
+    r"discovery|lateral\s+movement|collection|command\s+and\s+control|exfiltration|impact|"
+    r"process\s+injection|command\s+and\s+scripting\s+interpreter|powershell|web\s+shell"
+    r")\b",
+    re.IGNORECASE,
+)
+_RESEARCH_VERB_RE = re.compile(
+    r"\b(grab|get|find|show|list|search|latest|new|recent|investigate|analyze|analyse|"
+    r"analysis|scan|lookup|check|research|what\s+is)\b",
+    re.IGNORECASE,
+)
 
 # ── Intent keyword map ───────────────────────────────────────────────────
 
@@ -45,11 +62,17 @@ _INTENT_KEYWORDS: Dict[str, List[str]] = {
     "ip_analysis":       ["ip", "address", "ipv4", "ipv6", "abuseipdb"],
     "hash_analysis":     ["hash", "md5", "sha1", "sha256", "malware sample", "virustotal"],
     "domain_analysis":   ["domain", "dns", "whois", "subdomain", "fqdn"],
-    "cve_lookup":        ["cve", "vulnerability", "exploit", "patch", "nvd"],
+    "cve_lookup":        ["cve", "vulnerability", "vulnerabilities", "vuln", "vulns", "exploit", "patch", "nvd"],
     "mitre_lookup":      ["mitre", "att&ck", "attack", "technique", "tactic", "ttp"],
     "threat_research":   ["threat", "campaign", "apt", "ransomware", "phishing",
-                          "malware", "botnet", "c2", "c&c", "ioc"],
-    "report_generation": ["report", "summarize", "summary", "brief", "executive"],
+                          "malware", "botnet", "c2", "c&c", "ioc", "csrf", "xss",
+                          "sql injection", "rce", "zero day", "0day", "latest",
+                          "new", "recent", "search"],
+    "research":          ["grab", "get", "find", "show", "list", "search", "latest",
+                          "new", "recent", "vuln", "vulnerability", "exploit", "csrf",
+                          "xss", "sqli", "injection", "rce", "ssrf", "phishing",
+                          "ransomware", "malware", "apt", "ioc", "mitre"],
+    "report_generation": ["report", "generate report", "build report", "summarize", "summary", "brief", "executive"],
 }
 
 # Short / casual messages that should NOT trigger the full agent pipeline
@@ -63,12 +86,13 @@ _GREETING_PATTERNS: List[str] = [
 # ── Routing rules: intent -> ordered agent list ──────────────────────────
 
 _ROUTING_RULES: Dict[str, List[str]] = {
-    "ip_analysis":       ["analyst", "reporter"],
-    "hash_analysis":     ["analyst", "reporter"],
-    "domain_analysis":   ["analyst", "reporter"],
-    "cve_lookup":        ["analyst", "reporter"],
-    "mitre_lookup":      ["analyst", "reporter"],
-    "threat_research":   ["osint", "reporter"],
+    "ip_analysis":       ["osint", "analyst", "reporter"],
+    "hash_analysis":     ["osint", "analyst", "reporter"],
+    "domain_analysis":   ["osint", "analyst", "reporter"],
+    "cve_lookup":        ["osint", "analyst", "reporter"],
+    "mitre_lookup":      ["osint", "analyst", "reporter"],
+    "threat_research":   ["osint", "analyst", "reporter"],
+    "research":          ["osint", "analyst", "reporter"],
     "report_generation": ["reporter"],
     "general_cti":       ["osint", "analyst", "reporter"],
     "conversation":      [],  # handled directly by Orchestrator via LLM
@@ -89,8 +113,8 @@ class Router:
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         self.loader = ConfigLoader.instance()
         self.cfg = config or dict(self.loader.settings)
-        self._api_key: str = self.loader.get_api_key("openrouter")
-        self._llm_cfg: Dict[str, Any] = dict(self.loader.get_llm_config("openrouter"))
+        self._llm_client = LLMClient(self.cfg)
+        self.last_llm_meta: Dict[str, Any] = {}
         logger.info("Router initialised.")
 
     # =====================================================================
@@ -237,7 +261,12 @@ class Router:
         if indicators.get("domains"):
             return ("domain_analysis", 0.90)
 
-        # --- 2. Keyword scoring ---
+        # --- 2. Open-ended cyber research ---
+        if _CYBER_TOPIC_RE.search(query_lower):
+            confidence = 0.82 if _RESEARCH_VERB_RE.search(query_lower) else 0.72
+            return ("research", confidence)
+
+        # --- 3. Keyword scoring ---
         scores: Dict[str, float] = {}
         for intent, keywords in _INTENT_KEYWORDS.items():
             hits = sum(1 for kw in keywords if kw in query_lower)
@@ -250,7 +279,7 @@ class Router:
             confidence = min(0.90, 0.45 + raw_confidence * 0.50)
             return (best_intent, round(confidence, 2))
 
-        # --- 3. Fallback ---
+        # --- 4. Fallback ---
         return ("general_cti", 0.30)
 
     # =====================================================================
@@ -356,35 +385,16 @@ class Router:
         )
         user_prompt = f"Classify this CTI query:\n\n{query}"
 
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": self._llm_cfg.get("model"),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            "temperature": 0.0,
-            "max_tokens": 120,
-        }
-
         try:
-            resp = requests.post(
-                self._llm_cfg.get("endpoint"),
-                headers=headers,
-                json=payload,
-                timeout=self._llm_cfg.get("timeout", 15),
+            raw_text, meta = self._llm_client.generate(
+                prompt=f"{system_prompt}\n\n{user_prompt}",
+                provider=None,
+                allow_fallback=True,
+                temperature=0.0,
+                max_tokens=120,
+                timeout=15,
             )
-            resp.raise_for_status()
-            data = resp.json()
-
-            raw_text = ""
-            choices = data.get("choices", [])
-            if choices:
-                message = choices[0].get("message", {})
-                raw_text = message.get("content", "") or choices[0].get("text", "")
+            self.last_llm_meta = dict(meta)
 
             if not raw_text:
                 logger.warning("LLM fallback returned empty response.")
@@ -395,7 +405,20 @@ class Router:
                 cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
                 cleaned = re.sub(r"\s*```$", "", cleaned)
 
-            result = json.loads(cleaned)
+            try:
+                result = json.loads(cleaned)
+            except json.JSONDecodeError:
+                # Invalid output from primary path -> retry with explicit Groq.
+                raw_text, meta = self._llm_client.generate(
+                    prompt=f"{system_prompt}\n\n{user_prompt}",
+                    provider="groq",
+                    allow_fallback=False,
+                    temperature=0.0,
+                    max_tokens=120,
+                    timeout=15,
+                )
+                self.last_llm_meta = dict(meta)
+                result = json.loads(raw_text.strip())
             llm_intent = result.get("intent", "general_cti")
             if llm_intent not in valid_intents:
                 logger.warning("LLM returned unknown intent '%s'; defaulting to general_cti.", llm_intent)
@@ -409,8 +432,6 @@ class Router:
 
         except json.JSONDecodeError as exc:
             logger.warning("LLM fallback returned non-JSON: %s", exc)
-        except requests.RequestException as exc:
-            logger.warning("LLM fallback HTTP error: %s", exc)
         except Exception as exc:
             logger.exception("Unexpected error in LLM fallback: %s", exc)
 
