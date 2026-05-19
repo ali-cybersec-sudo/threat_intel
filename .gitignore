@@ -1,0 +1,38 @@
+.env
+.env.local
+secrets/
+*.secret
+*.key
+*.env
+*.yaml
+
+# Python files
+*.pyc
+*.pyo
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sbm
+
+# Logs and data
+logs/
+data/
+
+# Virtual environments
+venv/
+env/
+venv
+env
+
+# Other
+node_modules/
+dbRéallt/
+tmp/
+.Python
+*~

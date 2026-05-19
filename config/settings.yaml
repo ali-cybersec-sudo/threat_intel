@@ -1,16 +1,63 @@
-# System settings – fill in with actual API keys, model names, etc.
-web_search:
-  provider: duckduckgo  # or tavily, serper, etc.
-  max_results: 5
-rag:
-  provider: chromadb
-  collection_name: cti_reports
-  persist_dir: ./data/chroma_db
-cache:
-  ttl_seconds: 3600
+# =============================================================================
+# CTI Multi-Agent System – settings.yaml
+# =============================================================================
+# All secret keys live in .env (never commit them here).
+
+# ── Default LLM provider ────────────────────────────────────────────────
+default_llm: openrouter
+
+# ── LLM provider configurations ─────────────────────────────────────────
+llm:
+  openrouter:
+    model: openrouter/auto
+    endpoint: https://openrouter.ai/api/v1/chat/completions
+    temperature: 0.2
+    max_tokens: 5000
+    timeout: 45
+
+# ── Agent configurations ─────────────────────────────────────────────────
+agents:
+  osint:
+    max_retries: 2
+    timeout: 30
+  analyst:
+    max_retries: 2
+    timeout: 10
+  reporter:
+    max_tokens: 2048
+
+# ── Tool configurations ─────────────────────────────────────────────────
+tools:
+  web_search:
+    provider: duckduckgo
+    max_results: 10
+  rag:
+    provider: chromadb
+    collection_name: cti_reports
+    persist_dir: ./data/chroma_db
+    embedding_model: all-MiniLM-L6-v2
+    chunk_size: 1000
+    chunk_overlap: 200
+    top_k: 5
+  cache:
+    ttl_seconds: 3600
+  input_guard:
+    max_length: 5000
+    block_injections: true
+  output_guard:
+    max_output_length: 50000
+    redact_credentials: true
+    redact_pii: true
+
+# ── Memory configurations ───────────────────────────────────────────────
+memory:
+  session_memory:
+    max_turns: 10
+  vector_memory:
+    provider: chromadb
+    collection_name: long_term_memory
+    persist_dir: ./data/vector_db
+
+# ── Session settings ────────────────────────────────────────────────────
 session:
   max_turns: 10
-vector_memory:
-  provider: chromadb
-  collection_name: long_term_memory
-  persist_dir: ./data/vector_db

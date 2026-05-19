@@ -1,6 +1,6 @@
 """Caching layer – placeholder until real implementation."""
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 class CAGCache:

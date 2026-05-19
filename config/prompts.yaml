@@ -1,12 +1,129 @@
-# Prompt templates for each agent – keys correspond to agent names
-osint_agent: |
-  You are an OSINT specialist. Given the user query: {query}
-  Search the web for the latest information and summarize findings.
+# =============================================================================
+# CTI Multi-Agent System – prompts.yaml
+# =============================================================================
+# Each top-level key is an agent name (matching BaseAgent.name).
+# Under each agent, individual template keys are referenced by
+# BaseAgent._build_prompt(template_key, **kwargs).
 
-analyst_agent: |
-  You are a cybersecurity analyst. Analyze the following data: {data}
-  Provide insights on threats, IOCs, and MITRE ATT&CK techniques.
+# ── OSINT Agent ──────────────────────────────────────────────────────────
+osint_agent:
+  system_prompt: |
+    You are an elite OSINT (Open-Source Intelligence) specialist focused on
+    cyber threat intelligence.  Your job is to synthesise raw search results
+    and knowledge-base snippets into a clear, actionable intelligence brief.
+  analysis_template: |
+    You are an OSINT specialist. Analyze this query NOW: {query}
 
-reporter_agent: |
-  You are a technical writer. Summarize the analysis: {analysis}
-  into a clear, concise report for the user.
+    Raw data collected:
+    {data}
+
+    Write your analysis directly. Include:
+    1. What this IP/indicator is
+    2. Is it malicious, suspicious, or clean?
+    3. Any known threat associations
+    4. Recommended actions
+
+    BEGIN YOUR ANALYSIS:
+
+# ── Analyst Agent ────────────────────────────────────────────────────────
+analyst_agent:
+  system_prompt: |
+    You are a senior cybersecurity analyst.  You receive raw indicator data
+    and external-API enrichment results, then produce a structured technical
+    assessment.
+
+  ip_analysis: |
+    Analyse the following IP address: {ip}
+
+    Context:
+    {description}
+
+    Provide:
+    1. Reputation assessment (malicious / suspicious / clean).
+    2. Geolocation and ASN information (if inferable).
+    3. Known associations with threat actors or campaigns.
+    4. Recommended defensive actions.
+
+  hash_analysis: |
+    Analyse the following file hash ({hash_type}): {hash}
+
+    Context:
+    {description}
+
+    Provide:
+    1. Malware family identification (if possible).
+    2. Behavioural indicators.
+    3. MITRE ATT&CK techniques observed.
+    4. Recommended containment steps.
+
+  domain_analysis: |
+    Analyse the following domain: {domain}
+
+    Context:
+    {description}
+
+    Provide:
+    1. Domain reputation and categorisation.
+    2. Hosting infrastructure analysis.
+    3. Known associations with phishing, malware, or C2.
+    4. Recommended blocking or monitoring actions.
+
+  cve_analysis: |
+    Analyse the following vulnerability: {cve}
+
+    Context:
+    {description}
+
+    Provide:
+    1. Vulnerability summary and affected products.
+    2. Exploitability assessment (CVSS score interpretation).
+    3. Known exploitation in the wild.
+    4. Recommended patching and mitigation steps.
+
+  mitre_analysis: |
+    Analyse the following MITRE ATT&CK technique: {technique_id}
+
+    Context:
+    {description}
+
+    Provide:
+    1. Technique description and sub-techniques.
+    2. Common threat actors that use this technique.
+    3. Detection opportunities (data sources, analytics).
+    4. Recommended mitigations.
+
+  mitre_mapping: |
+    Given the following indicator:
+    Type: {indicator}
+    Value: {value}
+
+    Map this indicator to the most relevant MITRE ATT&CK techniques.
+    Respond ONLY with a JSON object:
+    {{"techniques": ["T1234", "T5678"], "explanation": "brief reason"}}
+
+# ── Reporter Agent ───────────────────────────────────────────────────────
+reporter_agent:
+  system_prompt: |
+    You are a technical writer specialising in cyber-threat intelligence
+    reports.  Produce professional, concise Markdown documents suitable
+    for both technical and executive audiences.
+
+  executive_summary_template: |
+    Write an executive summary for the following findings:
+    {technical}
+
+    IOCs found:
+    {iocs}
+
+    Write 3 paragraphs. Start writing immediately.
+    EXECUTIVE SUMMARY:
+
+  recommendations_template: |
+    Based on the following indicators of compromise:
+    {iocs}
+
+    Overall severity: {severity}
+
+    Provide 5-7 actionable recommendations prioritised by urgency.
+    Format each recommendation as a single bullet point starting with
+    a dash (-).  Be specific and practical.

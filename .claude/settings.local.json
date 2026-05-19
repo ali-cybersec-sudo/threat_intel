@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "PowerShell(mkdir memory *)",
-      "PowerShell(mkdir config *)"
+      "PowerShell(mkdir config *)",
+      "PowerShell(mkdir core *)",
+      "Bash(python *)",
+      "Bash(taskkill *)",
+      "PowerShell(taskkill *)",
+      "Bash(streamlit run *)",
+      "Bash(pip install *)"
     ]
   }
 }

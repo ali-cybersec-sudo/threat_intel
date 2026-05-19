@@ -1,0 +1,409 @@
+# Project Overview
+This project is a CTI (Cyber Threat Intelligence) multi-agent assistant that routes user cybersecurity queries (IP, domain, hash, CVE, MITRE, research) through a pipeline of specialized agents and returns a report via CLI or Streamlit UI.
+
+Primary goals:
+- Detect query intent and indicators.
+- Collect OSINT and local RAG context.
+- Analyze indicators with external services.
+- Generate professional CTI markdown reports.
+- Apply input/output security guards.
+
+Project root: `C:\Users\aliei\OneDrive\Desktop\generative_AI\project`
+
+# Architecture Overview
+The codebase follows a modular layered architecture:
+- `ui/` and `main.py`: presentation and entrypoints.
+- `core/`: orchestration and routing logic.
+- `agents/`: domain-specific execution units.
+- `tools/`: integrations (web search, RAG, cache).
+- `memory/`: short/long-term memory adapters.
+- `security/`: input/output guardrails.
+- `config/`: singleton configuration loader.
+
+High-level runtime path:
+1. User submits query (CLI or Streamlit).
+2. `Orchestrator` sanitizes/validates input.
+3. `IntentClassifier` optionally short-circuits conversational requests.
+4. `Router` builds execution plan and params.
+5. Agents run sequentially (`osint`, `analyst`, `reporter`) per plan.
+6. Output is sanitized by `OutputGuard`.
+7. Session history is persisted.
+8. UI/CLI renders response and metadata.
+
+```mermaid
+flowchart TD
+    A[User Query] --> B[InputGuard]
+    B --> C[IntentClassifier]
+    C -->|Conversational| D[Lightweight response]
+    C -->|Investigation| E[Router]
+    E --> F[Plan + params]
+    F --> G[OSINTAgent optional]
+    F --> H[AnalystAgent optional]
+    G --> I[ReporterAgent]
+    H --> I
+    I --> J[OutputGuard]
+    J --> K[SessionMemory + UI/CLI output]
+```
+
+# Folder Structure
+- `agents/`: agent implementations and two base abstractions.
+- `core/`: orchestration, routing, intent classification.
+- `tools/`: search, retrieval, cache.
+- `memory/`: in-memory placeholders for session/vector memory.
+- `security/`: request/response sanitization.
+- `config/`: YAML/env config loader.
+- `ui/`: Streamlit app.
+- root scripts/tests: run, smoke tests, helper fix script.
+
+# Dependency Analysis
+Declared deps (`requirements.txt`): LangChain family, ChromaDB, Streamlit, requests, bs4, sentence-transformers, pypdf, duckduckgo-search.
+
+Actually used directly in code:
+- `streamlit`, `requests`, `pyyaml`, `python-dotenv`, `duckduckgo-search`/`ddgs`, `chromadb`, `sentence-transformers`, `pypdf`.
+- LangChain packages are declared but not imported in current source.
+
+External service dependencies:
+- OpenRouter LLM API.
+- AbuseIPDB API.
+- VirusTotal API.
+- NVD API.
+- MITRE endpoint (currently likely invalid API path).
+- whoisjson.com and dns.google.
+- Tavily API (optional).
+
+# Execution Flow
+## Entrypoints
+- `main.py`
+  - `--ui`: launches Streamlit app.
+  - `--query`: runs one query via `Orchestrator.handle_query`.
+  - `--ingest`: ingests files into RAG store.
+- `ui/app.py`
+  - Chat-based interface using `Orchestrator.route_query`.
+
+## Orchestrator flow (`core/orchestrator.py`)
+1. `InputGuard.sanitise` then `InputGuard.validate`.
+2. `IntentClassifier.classify`.
+3. If conversational: `_handle_conversational` returns static guidance.
+4. Else `Router.route` to get `agents/order/params/intent/confidence/indicators`.
+5. Loop through agents and call `agent.execute(payload)`.
+6. Build response via `_build_response`.
+7. Sanitize all strings with `OutputGuard.sanitise_dict`.
+8. Save user/assistant turns in `SessionMemory` and internal `_history`.
+
+## UI flow (`ui/app.py`)
+- Initializes `st.session_state` (`orchestrator`, `messages`, `last_result`).
+- Accepts chat input or sidebar quick query.
+- Calls `route_query`.
+- Renders answer/report, severity/confidence metrics, and recent history.
+
+# File-by-File Documentation
+## Root Files
+### `README.md`
+- Minimal project description; no operational documentation.
+
+### `Structure.md`
+- Intended architecture outline (Arabic comments).
+- References `settings.yaml`/`prompts.yaml` that are not present in current tree.
+
+### `requirements.txt`
+- Dependency manifest.
+- Includes unused packages (LangChain set) in current implementation.
+
+### `main.py`
+- Role: CLI entrypoint and UI launcher.
+- Imports: argparse/json/logging/sys/pathlib, lazy imports for orchestrator/config/rag.
+- Functions:
+  - `run_ui()`: runs `streamlit run ui/app.py` as subprocess.
+  - `run_query(query)`: executes orchestrator and prints markdown + metadata.
+  - `run_ingest(directory)`: creates `RAGEngine` and ingests directory.
+  - `main()`: parses args and dispatches handlers.
+- Side effects: starts subprocess, network calls through downstream components.
+
+### `fix_reporter.py`
+- One-off utility to patch invalid escape in reporter table formatting.
+- Not used by runtime.
+
+### `test_system.py`
+- Smoke tests for router/guards/tools/memory basic behavior.
+- Uses `Router.__new__` bypassing constructor to avoid config dependence.
+
+### `test_llm.py`
+- Manual script to instantiate `OSINTAgent` and run one query.
+
+### `test_key.py`
+- Manual script to verify `OPENROUTER_API_KEY` presence.
+
+## `core/`
+### `core/orchestrator.py`
+- Central coordinator class `Orchestrator`.
+- Key fields:
+  - `input_guard`, `output_guard`, `router`, `session`, `_agents`, `_history`, `classifier`.
+- Key methods:
+  - `_get_agent(name)`: lazy instance creation for `osint/analyst/reporter`.
+  - `handle_query(query)`: full secure routed pipeline.
+  - `_prepare_payload(...)`: maps plan params to each agent payload.
+  - `_handle_conversational(...)`: non-agent answer path.
+  - `_build_response(...)`: normalized output object.
+  - `_error_response(...)`: standard error shape.
+  - `route_query(query)`: UI-friendly wrapper using classifier.
+  - `_run_pipeline(...)`: unused placeholder/dead code.
+- Important coupling:
+  - Depends on router plan schema and each agent `execute` contract.
+
+### `core/router.py`
+- Query parser and planner.
+- Module-level regex constants for IOC extraction and intent keywords.
+- Main methods:
+  - `route(query)`: end-to-end planning.
+  - `_extract_indicators(query)`: extracts `ips/hashes/domains/cves/mitre_ids`.
+  - `_detect_intent(query, indicators)`: heuristic intent with confidence.
+  - `_select_agents(intent, indicators)`: ensures `reporter` final.
+  - `_build_agent_params(...)`: constructs payload params per agent.
+  - `_llm_fallback_routing(query)`: OpenRouter fallback JSON classifier.
+- External calls: OpenRouter via `requests.post`.
+
+### `core/intent_classifier.py`
+- Fast binary classifier: conversational vs investigation.
+- Output keys: `path`, `intent`, `ioc_type`, `ioc_value`.
+- Used by orchestrator before router for short-circuit handling.
+
+## `agents/`
+### `agents/base_agent.py`
+- Runtime base class used by real agents.
+- Responsibilities:
+  - OpenRouter API calls (`_call_llm`).
+  - Prompt rendering via `ConfigLoader.get_prompt_template`.
+  - Memory helpers (`_save_to_memory`, `_retrieve_from_memory`).
+  - Input validation wrapper and standard error handler.
+- Risks:
+  - `_validate_input` calls `loader.get_tool_config("input_guard")`, but guard config is not clearly under `tools`.
+  - Uses dynamic `__import__` and expects memory config names that may not exist.
+
+### `agents/agent.py`
+- Alternate/legacy `BaseAgent` abstraction with `run()` (not `execute()`).
+- Provides lazy tool providers.
+- Currently not wired into orchestrator.
+- Dead/duplicate abstraction risk.
+
+### `agents/osint_agent.py`
+- Pipeline:
+  - validate input -> cache check -> web search -> optional RAG retrieve -> merge -> LLM summary -> cache set -> vector memory store.
+- Methods:
+  - `_merge_results(web_results, rag_results)`.
+  - `execute(query)`.
+- Calls:
+  - `WebSearchTool.search`, `RAGEngine.retrieve`, `BaseAgent._call_llm`, `CAGCache.get/set`.
+
+### `agents/analyst_agent.py`
+- Indicator-specific analysis agent.
+- Methods:
+  - `_get_optional_key`, `_detect_type`.
+  - `_analyze_ip/_analyze_hash/_analyze_domain/_analyze_cve/_analyze_mitre`.
+  - `_calculate_severity` heuristic scoring.
+  - `_map_to_mitre` LLM-based ATT&CK mapping.
+  - `execute(indicator)` master dispatcher.
+- External integrations:
+  - AbuseIPDB, VirusTotal, dns.google, whoisjson, NVD, MITRE URL.
+
+### `agents/reporter_agent.py`
+- Builds final markdown report from osint+analyst outputs.
+- Methods:
+  - `_structure_report`, `_generate_executive_summary`, `_format_ioc_table`, `_format_mitre_table`, `_generate_recommendations`, `_format_markdown`, `execute`.
+- Output: `{agent, markdown, metadata, confidence}`.
+
+## `tools/`
+### `tools/web_search.py`
+- Search provider abstraction.
+- `search()` dispatches to `_search_duckduckgo` or `_search_tavily`.
+- Returns list of `{title, snippet, url}`.
+
+### `tools/rag_engine.py`
+- Chroma-based retrieval system.
+- Methods:
+  - `_init_chroma`, `_get_embed_fn`, `_chunk_text`.
+  - `ingest_text`, `ingest_pdf`, `ingest_directory`.
+  - `retrieve`.
+- Data persistence in `persist_dir`.
+
+### `tools/cag_cache.py`
+- In-memory dict cache placeholder.
+- No TTL/eviction/persistence.
+
+## `memory/`
+### `memory/session_memory.py`
+- In-memory list with `add()` and `get_recent(n)`.
+
+### `memory/vector_memory.py`
+- Placeholder key-value store `store()` and empty `retrieve()`.
+- Missing `search()` method, but `BaseAgent._retrieve_from_memory` expects `search()`.
+
+## `security/`
+### `security/input_guard.py`
+- Rejects long/empty/forbidden char/injection-pattern input.
+- Methods: `validate`, alias `validate_input`, `sanitise`.
+
+### `security/output_guard.py`
+- Redacts credentials, emails, local paths, private IPs.
+- Methods: `sanitise`, `sanitise_dict` recursive.
+
+## Package `__init__.py` files
+- `agents/__init__.py`, `core/__init__.py`, `tools/__init__.py`, `memory/__init__.py`, `config/__init__.py`, `security/__init__.py`, `ui/__init__.py`
+- Role: package markers with short docstrings only.
+
+# Function-by-Function and Call Graph Summary
+Core call chain:
+- `main.main` -> `run_query`/`run_ui`/`run_ingest`
+- `run_query` -> `Orchestrator.handle_query`
+- `handle_query` -> `InputGuard` -> `IntentClassifier` -> `Router.route` -> `agent.execute(...)`
+- `OSINTAgent.execute` -> `WebSearchTool.search` + `RAGEngine.retrieve` + `_call_llm`
+- `AnalystAgent.execute` -> type-specific `_analyze_*` + `_calculate_severity` + `_map_to_mitre`
+- `ReporterAgent.execute` -> report structuring + LLM summary/recommendations + markdown format
+- `handle_query` -> `OutputGuard.sanitise_dict` -> `SessionMemory.add`
+
+```mermaid
+graph LR
+A[main.py] --> B[core/orchestrator.py]
+B --> C[core/intent_classifier.py]
+B --> D[core/router.py]
+B --> E[agents/osint_agent.py]
+B --> F[agents/analyst_agent.py]
+B --> G[agents/reporter_agent.py]
+E --> H[tools/web_search.py]
+E --> I[tools/rag_engine.py]
+E --> J[tools/cag_cache.py]
+B --> K[security/input_guard.py]
+B --> L[security/output_guard.py]
+B --> M[memory/session_memory.py]
+E --> N[memory/vector_memory.py]
+F --> N
+G --> N
+```
+
+# API/Data Flow
+Request shape:
+- Input: user text query.
+- Router output plan:
+  - `agents`: ordered list.
+  - `params`: per-agent payloads.
+  - `intent/confidence/indicators` metadata.
+
+Agent IO contracts:
+- OSINT in: `query:str`; out: `{summary,sources,confidence}`.
+- Analyst in: `indicator:str`; out: `{type,details,severity,score,mitre,confidence}`.
+- Reporter in: `{osint:dict, analyst:dict}`; out: `{markdown,metadata,confidence}`.
+
+Response object (orchestrator):
+- `status, query, intent, confidence, summary, markdown, severity, indicators, agents_used, agent_results, elapsed_seconds`.
+
+# Database Flow
+- No SQL/NoSQL DB.
+- Vector store path:
+  - `tools/rag_engine.py` uses Chroma PersistentClient at `persist_dir`.
+- Cache/memory currently volatile process-memory dictionaries/lists.
+
+# Security Analysis
+Strengths:
+- Input sanitization + pattern blocking.
+- Output redaction for common leaks.
+- Centralized guard usage in orchestrator.
+
+Vulnerabilities / gaps:
+- Missing config files can crash startup before guards apply.
+- LLM prompt injection still partially possible via benign-looking payloads.
+- Reporter builds markdown from untrusted external text (possible content injection in markdown context).
+- External HTTP calls lack strict allowlist and robust retry/backoff/circuit-breaker.
+- Potential secret exposure in logged HTTP errors (`response.text`).
+
+# Performance Analysis
+Hotspots:
+- LLM calls in all 3 agents.
+- Embedding model load for RAG.
+- Multiple sequential external HTTP calls in analyst.
+
+Current limits:
+- Fully sequential pipeline; no parallel execution of independent tasks.
+- In-memory cache only; no shared cache across sessions.
+- Re-instantiation of memory handlers in helper functions.
+
+# Bugs and Risks
+Critical/runtime issues:
+1. `config/settings.yaml` and `config/prompts.yaml` are referenced but not present -> `ConfigLoader` raises `RuntimeError` on init.
+2. Naming mismatch: agents use names `osint_agent/analyst_agent/reporter_agent` for prompt lookup, but prompt keys may be different in intended config.
+3. `VectorMemory` implements `retrieve()` but `BaseAgent._retrieve_from_memory` calls `search()`.
+4. `AnalystAgent._get_optional_key` checks wrong source (`_settings`) for env presence; key detection logic is invalid.
+5. `ReporterAgent._structure_report` reads `analyst.get("llm")` though LLM text is nested under `analyst["details"]["llm"]`.
+6. `Orchestrator._run_pipeline` is dead placeholder; may confuse maintainers.
+7. `agents/agent.py` duplicates base agent concept with incompatible interface (`run` vs `execute`).
+8. `core/router.py` and `core/intent_classifier.py` duplicate intent logic, creating divergence risk.
+9. MITRE endpoint used in `AnalystAgent` likely invalid (`attack.mitre.org/api.php/techniques/...`).
+10. `test_system.py` bypasses constructor internals (`Router.__new__`), masking integration failures.
+
+# Refactoring Suggestions
+1. Unify to a single base agent class; remove or archive `agents/agent.py`.
+2. Merge `IntentClassifier` and `Router` intent extraction into one source of truth.
+3. Introduce strict typed schemas (Pydantic/dataclasses) for plan and agent payloads.
+4. Replace placeholder memory/cache with production implementations (TTL cache + persistent vector memory).
+5. Centralize HTTP client with retries, timeouts, backoff, and observability.
+6. Add provider adapters for AbuseIPDB/VT/NVD/MITRE with clean interfaces.
+7. Move prompt rendering to tested prompt service; validate required template keys at boot.
+8. Add startup health check that validates config/env/dependencies.
+
+# Improvements Recommendations
+Security:
+- Add URL allowlist + SSRF protections for all outbound requests.
+- Strip/escape markdown table/user-controlled text more defensively.
+- Reduce sensitive logging in HTTP error paths.
+
+Scalability:
+- Add async execution and concurrency where safe.
+- Externalize cache (Redis) and conversation store.
+- Batch LLM and retrieval operations.
+
+Reliability:
+- Add comprehensive unit/integration tests with mocked APIs.
+- Add CI checks for missing config artifacts.
+- Add circuit breakers and fallback modes per provider.
+
+Observability:
+- Structured logs with request IDs.
+- Metrics for latency/error rate per agent/tool.
+- Trace spans across orchestration stages.
+
+# Full Architecture Summary
+- Pattern: layered multi-agent orchestration with deterministic routing and optional LLM fallback classification.
+- Strength: clear separation of concerns (core/agents/tools/security/ui).
+- Weakness: config artifacts missing and duplicate abstractions causing runtime fragility.
+
+# Complete Dependency Graph
+- Internal graph shown above in mermaid call graph.
+- External dependency nodes:
+  - OpenRouter, AbuseIPDB, VirusTotal, Tavily, dns.google, whoisjson, NVD, MITRE endpoint, ChromaDB local storage.
+
+# File Communication Map
+- `ui/app.py` <-> `core/orchestrator.py`
+- `main.py` -> `core/orchestrator.py`, `tools/rag_engine.py`
+- `orchestrator.py` -> `router.py`, `intent_classifier.py`, `security/*`, `memory/session_memory.py`, `agents/*`
+- `agents/*` -> `config/config_loader.py`, `tools/*`, `memory/*`, external APIs
+- `router.py` -> `config_loader.py`, optional OpenRouter API
+
+# Full Execution Lifecycle
+1. Boot process loads config singleton.
+2. Query enters via CLI/UI.
+3. Input normalized and screened.
+4. Intent path selected.
+5. Investigation path produces route plan.
+6. Agent steps execute and emit structured outputs.
+7. Reporter composes final markdown.
+8. Output redacted and bounded.
+9. Response returned and history stored.
+
+# Suggested Security Improvements
+- Add strict schema validation for each agent output before downstream usage.
+- Add deny-by-default outbound policy and hostname verification.
+- Add configurable PII/entity redaction policies with tests.
+
+# Suggested Scalability Improvements
+- Async I/O for network-bound analyst calls.
+- Shared vector DB and distributed cache.
+- Stateless agent workers behind queue for horizontal scaling.
+- Pre-warm embedding model and agent pools.
